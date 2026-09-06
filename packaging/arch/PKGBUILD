@@ -15,7 +15,7 @@ pkgrel=1
 pkgdesc="SPICE agent for Linux guests, with native Wayland clipboard and resolution support"
 arch=('x86_64' 'aarch64')
 url="https://github.com/bjthompson805/spice-vdagent-wayland"
-license=('LGPL-2.1-or-later')
+license=('GPL-3.0-or-later')
 depends=(
 	gtk4
 	systemd-libs
