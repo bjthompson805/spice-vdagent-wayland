@@ -125,7 +125,11 @@ static bool parse_pci_device(const char *bdf, const char *end, PciDevice *device
 // /sys/devices/pci0000:00/0000:00:03.0/0000:01:01.0/0000:02:03.0/virtio2/drm/card0
 static PciAddress* parse_pci_address_from_sysfs_path(const char* addr)
 {
-    char *pos = strstr(addr, "/pci");
+    /* gcc's builtin strstr() prototype returns const char* when the first
+     * arg is const (matching the C11 generic-selection overload), but pos
+     * is later passed as a char** out-param to read_next_hex_number()
+     * below, so it has to stay non-const. */
+    char *pos = (char *)strstr(addr, "/pci");
     if (!pos) {
         return NULL;
     }
