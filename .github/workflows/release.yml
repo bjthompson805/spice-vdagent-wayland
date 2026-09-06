@@ -1,0 +1,87 @@
+name: Package and release
+
+# Tag push is the only trigger: each of the three build-*.sh scripts derives
+# the package version straight from the tag (v0.23.1 -> 0.23.1), so there's
+# no separate version bump to remember anywhere else. workflow_dispatch lets
+# a maintainer re-run the same build against an already-pushed tag (e.g. to
+# retry a flaky runner) without needing a new tag just to do that.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re)build, e.g. v0.23.0'
+        required: true
+
+jobs:
+  arch:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Build Arch package
+        run: |
+          version="${{ inputs.tag || github.ref_name }}"
+          version="${version#v}"
+          bash packaging/ci/build-arch.sh "$version" out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch-package
+          path: out/*.pkg.tar.zst
+
+  debian:
+    runs-on: ubuntu-latest
+    container: debian:bookworm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Build Debian package
+        run: |
+          version="${{ inputs.tag || github.ref_name }}"
+          version="${version#v}"
+          bash packaging/ci/build-deb.sh "$version" out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debian-package
+          path: out/*.deb
+
+  fedora:
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Build RPM
+        run: |
+          version="${{ inputs.tag || github.ref_name }}"
+          version="${version#v}"
+          bash packaging/ci/build-rpm.sh "$version" out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fedora-package
+          path: out/*.rpm
+
+  # workflow_dispatch reruns just need the built artifacts to inspect --
+  # only a real tag push publishes them as a Release, so retrying a build
+  # never creates (or overwrites) a release out from under a real one.
+  release:
+    if: github.event_name == 'push'
+    needs: [arch, debian, fedora]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*/*
+          generate_release_notes: true

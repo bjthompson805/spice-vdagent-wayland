@@ -1,5 +1,25 @@
-Spice agent for Linux
+Spice agent for Linux (Wayland fork)
 =====================
+
+This is a fork of the official spice-vdagent adding native Wayland support,
+which the official package does not implement at all under Wayland:
+
+* Clipboard sync (text and images, both the CLIPBOARD and PRIMARY
+  selections) via `wlr-data-control-unstable-v1`. The standard
+  `wl_data_device` protocol only notifies a client that holds keyboard
+  focus, which a headless background agent daemon structurally never has --
+  `wlr-data-control` is the purpose-built alternative for exactly this case
+  (it's what `wl-paste --watch` and clipboard managers use).
+* Resolution-setting via `wlr-output-management-unstable-v1` (wlroots
+  compositors: Hyprland, Sway, ...) or `org.gnome.Mutter.DisplayConfig`
+  (GNOME) -- picking whichever the running compositor actually implements.
+
+Pre-built packages (Arch, Debian, Fedora/RHEL) are published on the
+[GitHub Releases page](https://github.com/bjthompson805/spice-vdagent-wayland/releases)
+for every tag; see `packaging/` for the PKGBUILD/debian/rpm sources those
+are built from, and `.github/workflows/release.yml` for how.
+
+Everything below this point is the original upstream README.
 
 The spice agent for Linux consists of 2 parts, a daemon spice-vdagentd and
 a per X-session process spice-vdagent. The daemon gets started in Spice guests
