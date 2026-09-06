@@ -1,0 +1,62 @@
+# Maintainer: (see https://github.com/bjthompson805/spice-vdagent-wayland)
+#
+# Fork of the official spice-vdagent adding native Wayland support: a
+# wlr-data-control-based clipboard (text + images, CLIPBOARD and PRIMARY)
+# and resolution-setting via wlr-output-management (wlroots compositors) or
+# org.gnome.Mutter.DisplayConfig (GNOME) -- both structurally unsupported by
+# stock spice-vdagent under Wayland, see the project README for details.
+#
+# Replaces the official spice-vdagent package outright: same binaries, same
+# systemd units, same install paths -- it cannot be installed alongside it.
+
+pkgname=spice-vdagent-wayland
+pkgver=0.23.0
+pkgrel=1
+pkgdesc="SPICE agent for Linux guests, with native Wayland clipboard and resolution support"
+arch=('x86_64' 'aarch64')
+url="https://github.com/bjthompson805/spice-vdagent-wayland"
+license=('LGPL-2.1-or-later')
+depends=(
+	gtk4
+	systemd-libs
+	wayland
+	libxfixes
+	libxrandr
+	libxinerama
+	libx11
+	alsa-lib
+	dbus
+	libdrm
+	glib2
+	libpciaccess
+)
+makedepends=(
+	git
+	spice-protocol
+)
+provides=('spice-vdagent')
+conflicts=('spice-vdagent')
+replaces=('spice-vdagent')
+source=("$pkgname::git+$url.git#tag=v$pkgver")
+sha256sums=('SKIP')
+
+pkgver() {
+	cd "$pkgname"
+	git describe --long --tags 2>/dev/null | sed 's/^v//;s/-/./g' || echo "$pkgver"
+}
+
+build() {
+	cd "$pkgname"
+	# --sysconfdir=/etc: autotools' default (${prefix}/etc, i.e. /usr/etc under
+	# --prefix=/usr) is wrong for a real install -- nothing reads XDG autostart
+	# entries from /usr/etc, only /etc (verified: without this the .desktop
+	# lands at /usr/etc/xdg/autostart and silently never autostarts anything).
+	./autogen.sh --prefix=/usr --sysconfdir=/etc --with-gtk4=yes --with-init-script=systemd
+	make
+}
+
+package() {
+	cd "$pkgname"
+	make DESTDIR="$pkgdir" install
+	install -Dm644 COPYING "$pkgdir/usr/share/licenses/$pkgname/COPYING"
+}
