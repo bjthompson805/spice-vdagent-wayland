@@ -46,6 +46,8 @@ src_spice_vdagent_SOURCES =			\
 	src/vdagent/clipboard.h			\
 	src/vdagent/wlr-protocol/wlr-data-control-unstable-v1-protocol.c	\
 	src/vdagent/wlr-protocol/wlr-data-control-unstable-v1-client-protocol.h	\
+	src/vdagent/wlr-protocol/wlr-output-management-unstable-v1-protocol.c	\
+	src/vdagent/wlr-protocol/wlr-output-management-unstable-v1-client-protocol.h	\
 	src/vdagent/webdav-cb.c			\
 	src/vdagent/webdav-cb.h			\
 	src/vdagent/device-info.c		\
@@ -56,6 +58,8 @@ src_spice_vdagent_SOURCES =			\
 	src/vdagent/file-xfers.h		\
 	src/vdagent/mutter.c			\
 	src/vdagent/mutter.h			\
+	src/vdagent/wlr-output-management.c	\
+	src/vdagent/wlr-output-management.h	\
 	src/vdagent/x11-priv.h			\
 	src/vdagent/x11-randr.c			\
 	src/vdagent/x11.c			\

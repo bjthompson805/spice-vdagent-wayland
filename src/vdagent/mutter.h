@@ -29,5 +29,15 @@ void vdagent_mutter_destroy(VDAgentMutterDBus *mutter);
 
 GArray *vdagent_mutter_get_resolutions(VDAgentMutterDBus *mutter, int *width, int *height, int *screen_count);
 
+/* Attempts to apply mon_config via org.gnome.Mutter.DisplayConfig's
+ * ApplyMonitorsConfig. Unlike wlr-output-management's set_custom_mode(),
+ * Mutter requires picking one of the mode ids GetCurrentState already
+ * advertised for that monitor rather than an arbitrary width/height, so
+ * this can legitimately fail (return FALSE) for a resolution the virtual
+ * output hasn't advertised a mode for -- not just when Mutter is entirely
+ * unavailable. */
+gboolean vdagent_mutter_apply_monitors_config(VDAgentMutterDBus *mutter,
+                                              VDAgentMonitorsConfig *mon_config);
+
 
 #endif /* SRC_VDAGENT_MUTTER_H_ */

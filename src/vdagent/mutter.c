@@ -27,6 +27,7 @@
 #include <syslog.h>
 
 #include "vdagentd-proto.h"
+#include "spice/vd_agent.h"
 #include "mutter.h"
 
 // MUTTER DBUS FORMAT STRINGS
@@ -273,4 +274,149 @@ GArray *vdagent_mutter_get_resolutions(VDAgentMutterDBus *mutter,
 
     g_variant_unref(values);
     return res_array;
+}
+
+/* One resolved (connector, mode id) pair for a SPICE display id that both
+ * has a real monitor behind it and already advertises a mode matching the
+ * requested width/height -- see vdagent_mutter_apply_monitors_config()'s
+ * comment on why an existing mode id is required at all. */
+typedef struct {
+    gchar *connector; /* owned: the source GVariants are unreffed before this is used */
+    gchar *mode_id;   /* owned: ditto */
+} ResolvedMonitor;
+
+static void resolved_monitor_free(gpointer data)
+{
+    ResolvedMonitor *res = data;
+    g_free(res->connector);
+    g_free(res->mode_id);
+    g_free(res);
+}
+
+gboolean vdagent_mutter_apply_monitors_config(VDAgentMutterDBus *mutter,
+                                              VDAgentMonitorsConfig *mon_config)
+{
+    GError *error = NULL;
+
+    if (!mutter) {
+        return FALSE;
+    }
+
+    GVariant *state = g_dbus_proxy_call_sync(mutter->dbus_proxy, "GetCurrentState", NULL,
+                                             G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
+    if (!state) {
+        syslog(LOG_WARNING, "%s: failed to call GetCurrentState from mutter over DBUS", __func__);
+        if (error != NULL) {
+            syslog(LOG_WARNING, "   error message: %s", error->message);
+            g_clear_error(&error);
+        }
+        return FALSE;
+    }
+
+    guint32 serial;
+    GVariantIter *monitors = NULL;
+    g_variant_get_child(state, 0, "u", &serial);
+    g_variant_get_child(state, 1, MONITORS_FORMAT, &monitors);
+
+    /* SPICE display id -> ResolvedMonitor, only for displays we could
+     * actually match a connector and mode for. */
+    GHashTable *resolved = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, resolved_monitor_free);
+
+    GVariant *monitor = NULL;
+    while (g_variant_iter_next(monitors, "@"MONITOR_FORMAT, &monitor)) {
+        const gchar *connector = NULL;
+        GVariantIter *modes = NULL;
+        GVariant *monitor_specs = NULL;
+
+        g_variant_get_child(monitor, 0, "@"MONITOR_SPEC_FORMAT, &monitor_specs);
+        g_variant_get_child(monitor_specs, 0, "&s", &connector);
+        g_variant_get_child(monitor, 1, MODES_FORMAT, &modes);
+
+        gpointer value;
+        if (g_hash_table_lookup_extended(mutter->connector_mapping, connector, NULL, &value)) {
+            guint display_id = GPOINTER_TO_UINT(value);
+            if (display_id < mon_config->num_of_monitors) {
+                VDAgentMonConfig *mon = &mon_config->monitors[display_id];
+                if (mon->width && mon->height) {
+                    GVariant *mode = NULL;
+                    while (g_variant_iter_next(modes, "@"MODE_FORMAT, &mode)) {
+                        const gchar *mode_id = NULL;
+                        gint mode_width, mode_height;
+
+                        g_variant_get_child(mode, 0, "&s", &mode_id);
+                        g_variant_get_child(mode, 1, "i", &mode_width);
+                        g_variant_get_child(mode, 2, "i", &mode_height);
+
+                        if ((guint)mode_width == mon->width && (guint)mode_height == mon->height) {
+                            ResolvedMonitor *res = g_new(ResolvedMonitor, 1);
+                            res->connector = g_strdup(connector);
+                            res->mode_id = g_strdup(mode_id);
+                            g_hash_table_replace(resolved, GUINT_TO_POINTER(display_id), res);
+                            g_variant_unref(mode);
+                            break;
+                        }
+                        g_variant_unref(mode);
+                    }
+                }
+            }
+        }
+
+        g_variant_iter_free(modes);
+        g_variant_unref(monitor_specs);
+        g_variant_unref(monitor);
+    }
+    g_variant_iter_free(monitors);
+
+    if (g_hash_table_size(resolved) == 0) {
+        syslog(LOG_WARNING, "%s: none of the requested resolutions match a mode mutter "
+                            "already advertises for that monitor", __func__);
+        g_hash_table_unref(resolved);
+        g_variant_unref(state);
+        return FALSE;
+    }
+
+    GVariantBuilder logical_monitors;
+    g_variant_builder_init(&logical_monitors, G_VARIANT_TYPE("a(iiduba(ssa{sv}))"));
+
+    gboolean primary_assigned = FALSE;
+    for (guint display_id = 0; display_id < mon_config->num_of_monitors; display_id++) {
+        ResolvedMonitor *res = g_hash_table_lookup(resolved, GUINT_TO_POINTER(display_id));
+        if (!res) {
+            continue;
+        }
+        VDAgentMonConfig *mon = &mon_config->monitors[display_id];
+
+        GVariantBuilder monitor_specs_builder;
+        g_variant_builder_init(&monitor_specs_builder, G_VARIANT_TYPE("a(ssa{sv})"));
+        g_variant_builder_add(&monitor_specs_builder, "(ss@a{sv})", res->connector, res->mode_id,
+                              g_variant_new_array(G_VARIANT_TYPE("{sv}"), NULL, 0));
+
+        g_variant_builder_add(&logical_monitors, "(iidub@a(ssa{sv}))", (gint)mon->x, (gint)mon->y,
+                              1.0, 0u, !primary_assigned,
+                              g_variant_builder_end(&monitor_specs_builder));
+        primary_assigned = TRUE;
+    }
+
+    /* method 1 = "temporary": apply immediately without persisting to
+     * monitors.xml, matching the ephemeral nature of a SPICE client
+     * resize request (same intent as the X11 RandR path, which never
+     * writes any config file either). */
+    GVariant *result = g_dbus_proxy_call_sync(
+        mutter->dbus_proxy, "ApplyMonitorsConfig",
+        g_variant_new("(uu@a(iiduba(ssa{sv}))@a{sv})", serial, 1u,
+                      g_variant_builder_end(&logical_monitors),
+                      g_variant_new_array(G_VARIANT_TYPE("{sv}"), NULL, 0)),
+        G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
+
+    g_hash_table_unref(resolved);
+    g_variant_unref(state);
+
+    if (!result) {
+        syslog(LOG_WARNING, "%s: ApplyMonitorsConfig failed: %s", __func__,
+              error ? error->message : "?");
+        g_clear_error(&error);
+        return FALSE;
+    }
+    g_variant_unref(result);
+    return TRUE;
 }

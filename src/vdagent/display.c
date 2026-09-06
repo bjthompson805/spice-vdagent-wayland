@@ -43,6 +43,7 @@
 
 #include "mutter.h"
 #include "display.h"
+#include "wlr-output-management.h"
 
 /**
  * VDAgentDisplay and the vdagent_display_*() functions are used as wrappers for display-related
@@ -62,6 +63,7 @@ struct VDAgentDisplay {
     GIOChannel *x11_channel;
     guint io_watch_source_id;
     VDAgentMutterDBus *mutter;
+    VDAgentWlrOutputMgmt *wlr_output_mgmt;
 };
 
 static gint vdagent_guest_xorg_resolution_compare(gconstpointer a, gconstpointer b)
@@ -289,6 +291,9 @@ VDAgentDisplay* vdagent_display_create(UdscsConnection *vdagentd, int debug, int
     display->connector_mapping = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
 
     display->mutter = vdagent_mutter_create(display->connector_mapping);
+#ifdef USE_GTK_FOR_MONITORS
+    display->wlr_output_mgmt = vdagent_wlr_output_mgmt_create(display->connector_mapping);
+#endif
 
     display->x11_channel = g_io_channel_unix_new(vdagent_x11_get_fd(display->x11));
     if (display->x11_channel == NULL) {
@@ -330,6 +335,9 @@ void vdagent_display_destroy(VDAgentDisplay *display, int vdagentd_disconnected)
     vdagent_x11_destroy(display->x11, vdagentd_disconnected);
 
     vdagent_mutter_destroy(display->mutter);
+#ifdef USE_GTK_FOR_MONITORS
+    vdagent_wlr_output_mgmt_destroy(display->wlr_output_mgmt);
+#endif
 
     g_hash_table_destroy(display->connector_mapping);
     g_free(display);
@@ -481,8 +489,24 @@ void vdagent_display_set_monitor_config(VDAgentDisplay *display, VDAgentMonitors
 {
 #ifdef USE_GTK_FOR_MONITORS
     if (GDK_IS_WAYLAND_DISPLAY(gdk_display_get_default())) {
-        // FIXME: there is no equivalent call to set the monitor config under wayland
-        // Send the configuration back - the client need to know the resolution was not taken into account.
+        /* Try wlr-output-management first (Hyprland, Sway, ...); if the
+         * compositor doesn't implement it, fall back to Mutter's
+         * ApplyMonitorsConfig (GNOME) if that's live; if neither is
+         * available there is genuinely nothing that can set a resolution
+         * on this compositor today, so just report back what we've
+         * already got. wlr's request is async (it reports the outcome
+         * itself once the compositor replies, see its header), Mutter's
+         * is synchronous (report the result immediately). */
+        if (vdagent_wlr_output_mgmt_set_config(display->wlr_output_mgmt, display, mon_config)) {
+            return;
+        }
+        if (vdagent_mutter_apply_monitors_config(display->mutter, mon_config)) {
+            vdagent_display_send_daemon_guest_res(display, TRUE);
+            return;
+        }
+        syslog(LOG_WARNING, "%s: no Wayland backend available to set this monitor "
+                            "config (need wlr-output-management or a mode "
+                            "org.gnome.Mutter.DisplayConfig already advertises)", __func__);
         vdagent_display_send_daemon_guest_res(display, TRUE);
         return;
     }
