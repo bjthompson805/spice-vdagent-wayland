@@ -1,0 +1,10 @@
+spice-vdagent-wayland (0.23.0-1) unstable; urgency=medium
+
+  * Initial release: fork of spice-vdagent adding native Wayland support.
+    Clipboard sync (text and images, CLIPBOARD and PRIMARY selections) via
+    wlr-data-control-unstable-v1. Resolution-setting via
+    wlr-output-management-unstable-v1 (wlroots compositors) or
+    org.gnome.Mutter.DisplayConfig (GNOME) -- both unimplemented under
+    Wayland in the official package.
+
+ -- spice-vdagent-wayland <noreply@github.com>  Sun, 06 Sep 2026 00:19:09 -0700

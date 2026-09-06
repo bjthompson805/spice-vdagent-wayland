@@ -1,0 +1,23 @@
+#!/usr/bin/make -f
+
+# --sysconfdir=/etc: autotools' default under --prefix=/usr is ${prefix}/etc
+# (i.e. /usr/etc), which is wrong for a real install -- verified locally that
+# the spice-vdagent.desktop XDG autostart entry silently never fires from
+# there, only from /etc/xdg/autostart. dh_auto_configure's own --prefix=/usr
+# default doesn't set sysconfdir for us, so it's passed explicitly.
+#
+# --with-init-script=systemd: without it, ./configure's own default detection
+# of "is this a systemd machine" (via `pkg-config systemd`) does not reliably
+# resolve to "yes" even when libsystemd is installed and this file's own
+# Build-Depends list libsystemd-dev -- verified locally on Arch, where the
+# same gap left WITH_SYSTEMD_SOCKET_ACTIVATION undefined and the built
+# vdagentd then fought systemd's own spice-vdagentd.socket unit for the same
+# listening socket. Passing it explicitly is the actual fix, not a guess.
+%:
+	dh $@ --with autoreconf
+
+override_dh_auto_configure:
+	dh_auto_configure -- \
+		--sysconfdir=/etc \
+		--with-gtk4=yes \
+		--with-init-script=systemd

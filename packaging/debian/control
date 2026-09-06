@@ -1,0 +1,44 @@
+Source: spice-vdagent-wayland
+Section: comm
+Priority: optional
+Maintainer: spice-vdagent-wayland <noreply@github.com>
+Build-Depends: debhelper-compat (= 13),
+               dh-autoreconf,
+               pkgconf,
+               libgtk-4-dev,
+               libglib2.0-dev,
+               libwayland-dev,
+               libxfixes-dev,
+               libxrandr-dev,
+               libxinerama-dev,
+               libx11-dev,
+               libasound2-dev,
+               libdbus-1-dev,
+               libdrm-dev,
+               libpciaccess-dev,
+               libsystemd-dev,
+               spice-protocol
+Standards-Version: 4.6.2
+Homepage: https://github.com/bjthompson805/spice-vdagent-wayland
+Rules-Requires-Root: no
+
+Package: spice-vdagent-wayland
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Conflicts: spice-vdagent
+Replaces: spice-vdagent
+Provides: spice-vdagent
+Description: SPICE agent for Linux guests, with native Wayland support
+ Fork of the official spice-vdagent adding native Wayland support:
+ .
+  * Clipboard sync (text and images, CLIPBOARD and PRIMARY selections)
+    via wlr-data-control-unstable-v1, since the standard wl_data_device
+    protocol only notifies a client with keyboard focus, which a headless
+    agent daemon structurally never has.
+  * Resolution-setting via wlr-output-management-unstable-v1 (wlroots
+    compositors: Hyprland, Sway, ...) or org.gnome.Mutter.DisplayConfig
+    (GNOME), neither of which the official package implements under
+    Wayland at all.
+ .
+ Same binaries and install paths as the official spice-vdagent package;
+ this replaces it outright and cannot be installed alongside it.
