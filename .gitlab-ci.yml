@@ -1,0 +1,58 @@
+image: fedora:latest
+
+variables:
+  DEPS_COMMON: git libtool make python3 python3-six redhat-rpm-config
+      bzip2 python3-pyparsing meson ninja-build gtk-doc glib2-devel
+      gettext gettext-devel libpciaccess-devel alsa-lib-devel
+      libXfixes-devel libX11-devel libXrandr-devel libXinerama-devel
+      gtk3-devel dbus-devel systemd-devel procps-ng libdrm-devel gtk4-devel
+      vulkan-headers
+  DISTCHECK_CONFIGURE_FLAGS:
+      --with-session-info=none
+
+before_script:
+  - dnf install -y $DEPS_COMMON
+  - git clone https://gitlab.freedesktop.org/spice/spice-protocol.git
+  - meson --buildtype=release spice-protocol build-spice-protocol --prefix=/usr --werror
+  - ninja -C build-spice-protocol install
+
+fedora-autotools:
+  script:
+  - ./autogen.sh
+  - make
+  - git clean -xfd
+
+  - ./autogen.sh --with-session-info=none
+  - make distcheck --environment-overrides
+  - git clean -xfd
+
+  - ./autogen.sh --with-session-info=systemd --with-init-script=systemd+redhat
+  - make
+  - make install
+  - make uninstall
+  - git clean -xfd
+
+  - ./autogen.sh --with-session-info=console-kit --with-init-script=redhat
+  - make
+  - make install
+  - make uninstall
+  - git clean -xfd
+
+  - ./autogen.sh --with-gtk=no --with-session-info=none
+  - make
+  - make install
+  - make uninstall
+  - git clean -xfd
+
+  - ./autogen.sh --with-gtk4
+  - make
+  - make install
+  - make uninstall
+  - git clean -xfd
+
+  artifacts:
+    expire_in: '1 week'
+    when: on_failure
+    paths:
+      - test-suite.log
+      - tests/test*.log
