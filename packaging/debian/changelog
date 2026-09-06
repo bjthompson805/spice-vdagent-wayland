@@ -1,3 +1,15 @@
+spice-vdagent-wayland (0.23.1-1) unstable; urgency=medium
+
+  * Fix guest resolution reporting on a fractionally-scaled Wayland
+    compositor: gdk_monitor_get_geometry() returns logical (scale-divided)
+    pixels, not the physical pixels every consumer of this value actually
+    needs (the real guest framebuffer, and absolute pointer positions a
+    SPICE client sends). At any monitor scale other than an exact integer,
+    this made the guest's on-screen cursor track proportionally wrong
+    relative to the client's actual pointer position.
+
+ -- spice-vdagent-wayland <noreply@github.com>  Sun, 06 Sep 2026 01:33:59 -0700
+
 spice-vdagent-wayland (0.23.0-1) unstable; urgency=medium
 
   * Initial release: fork of spice-vdagent adding native Wayland support.

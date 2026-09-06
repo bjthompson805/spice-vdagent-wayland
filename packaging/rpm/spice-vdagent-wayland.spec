@@ -1,5 +1,5 @@
 Name:           spice-vdagent-wayland
-Version:        0.23.0
+Version:        0.23.1
 Release:        1%{?dist}
 Summary:        SPICE agent for Linux guests, with native Wayland support
 
@@ -97,6 +97,12 @@ Fork of the official spice-vdagent adding native Wayland support:
 %{_sysconfdir}/xdg/autostart/spice-vdagent.desktop
 
 %changelog
+* Sun Sep 06 2026 spice-vdagent-wayland <noreply@github.com> - 0.23.1-1
+- Fix guest resolution reporting on a fractionally-scaled Wayland
+  compositor: gdk_monitor_get_geometry() returns logical pixels, not the
+  physical pixels the guest framebuffer and absolute pointer positions
+  actually need, making the on-screen cursor track proportionally wrong
+  at any non-integer monitor scale.
 * Sat Sep 05 2026 spice-vdagent-wayland <noreply@github.com> - 0.23.0-1
 - Initial release: native Wayland clipboard (text + images, CLIPBOARD/
   PRIMARY) and resolution-setting (wlr-output-management / Mutter
