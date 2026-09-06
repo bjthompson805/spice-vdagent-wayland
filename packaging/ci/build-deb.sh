@@ -7,6 +7,11 @@ set -euo pipefail
 version="${1:?usage: build-deb.sh <version> <out-dir>}"
 out="${2:?usage: build-deb.sh <version> <out-dir>}"
 repo="$(pwd)"
+# Resolve before the cd below: a relative $out (e.g. the workflow's "out/")
+# must land back in $repo, not wherever the script's cwd happens to be by
+# the time it's used.
+mkdir -p "$out"
+out="$(cd "$out" && pwd)"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
@@ -37,5 +42,4 @@ cd "$build_root"
 # dh_auto_test for exactly this kind of environment-dependent test suite.
 DEB_BUILD_OPTIONS=nocheck dpkg-buildpackage -us -uc -b
 
-mkdir -p "$out"
 cp /tmp/debbuild/*.deb "$out/"
