@@ -34,9 +34,9 @@
 #include "clipboard.h"
 
 #ifdef USE_GTK_FOR_CLIPBOARD
-/* GTK4 port notes (Phase 1: text, CLIPBOARD selection only -- see the
- * project plan for Phase 2/3 which add PRIMARY selection and image
- * formats on top of this same structure).
+/* GTK4 port notes (Phase 1+2: text, both CLIPBOARD and PRIMARY selections
+ * -- see the project plan for Phase 3, which adds image formats on top of
+ * this same structure).
  *
  * Two entirely different mechanisms are used for the two directions, and
  * that split is deliberate, not incidental:
@@ -65,7 +65,9 @@
  *   observation -- it's what clipboard managers and `wl-paste --watch`
  *   actually use, for exactly this reason. See data_control_* below.
  */
-#define SELECTION_COUNT 1 /* CLIPBOARD only for now; PRIMARY is Phase 2 */
+/* VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD / _PRIMARY are 0 / 1, matching
+ * these indices directly. */
+#define SELECTION_COUNT 2
 
 #define TEXT_MIME_TYPE "text/plain;charset=utf-8"
 
@@ -81,9 +83,12 @@ typedef struct {
     guint         owner;
     GList        *requests_from_apps; /* GTask* list: VDAgent --> Client (guest paste of our data) */
 
-    /* observe side (guest -> host): wlr-data-control, see above */
-    struct zwlr_data_control_offer_v1 *pending_offer; /* being built; mime types still arriving */
-    gboolean      pending_has_text;
+    /* observe side (guest -> host): wlr-data-control, see above.
+     * pending_offer/pending_has_text live on VDAgentClipboards, not here
+     * -- a freshly-introduced offer (data_offer event) doesn't say which
+     * selection it's for until the following selection/primary_selection
+     * event arrives, so there's nothing to key a per-Selection pending
+     * state on yet. */
     struct zwlr_data_control_offer_v1 *current_offer; /* finalized; safe to receive() from */
     gboolean      current_has_text;
     /* zwlr_data_control_device_v1's "selection" event fires for every
@@ -157,6 +162,12 @@ struct _VDAgentClipboards {
     struct wl_registry *wl_registry;
     struct zwlr_data_control_manager_v1 *data_control_manager;
     struct zwlr_data_control_device_v1 *data_control_device;
+
+    /* being built for whichever offer was most recently introduced by a
+     * data_offer event; see the Selection typedef above for why this
+     * isn't keyed per-selection. */
+    struct zwlr_data_control_offer_v1 *pending_offer;
+    gboolean pending_has_text;
 #else
     struct vdagent_x11 *x11;
 #endif
@@ -220,10 +231,11 @@ static void clipboard_new_owner(VDAgentClipboards *c, guint sel_id, guint new_ow
 static void data_control_offer_offer(void *data, struct zwlr_data_control_offer_v1 *offer,
                                       const char *mime_type)
 {
-    Selection *sel = data;
+    VDAgentClipboards *c = data;
     (void)offer;
+    syslog(LOG_DEBUG, "%s: mime_type=%s", __func__, mime_type);
     if (g_strcmp0(mime_type, TEXT_MIME_TYPE) == 0) {
-        sel->pending_has_text = TRUE;
+        c->pending_has_text = TRUE;
     }
 }
 
@@ -235,21 +247,24 @@ static void data_control_data_offer(void *data, struct zwlr_data_control_device_
                                      struct zwlr_data_control_offer_v1 *offer)
 {
     VDAgentClipboards *c = data;
-    Selection *sel = &c->selections[0]; /* Phase 1: CLIPBOARD only */
     (void)device;
 
-    sel->pending_offer = offer;
-    sel->pending_has_text = FALSE;
-    zwlr_data_control_offer_v1_add_listener(offer, &offer_listener, sel);
+    syslog(LOG_DEBUG, "%s: offer=%p", __func__, (void *)offer);
+    c->pending_offer = offer;
+    c->pending_has_text = FALSE;
+    zwlr_data_control_offer_v1_add_listener(offer, &offer_listener, c);
 }
 
-static void data_control_selection(void *data, struct zwlr_data_control_device_v1 *device,
-                                    struct zwlr_data_control_offer_v1 *offer)
+/* Shared by data_control_selection (CLIPBOARD) and
+ * data_control_primary_selection (PRIMARY) -- same finalize logic once
+ * the sel_id is known, just applied to a different Selection slot. */
+static void data_control_offer_finalized(VDAgentClipboards *c, guint sel_id,
+                                          struct zwlr_data_control_offer_v1 *offer)
 {
-    VDAgentClipboards *c = data;
-    guint sel_id = 0; /* Phase 1: CLIPBOARD only */
     Selection *sel = &c->selections[sel_id];
-    (void)device;
+
+    syslog(LOG_DEBUG, "%s: sel_id=%u offer=%p expect_own=%d pending_has_text=%d",
+           __func__, sel_id, (void *)offer, sel->expect_own_selection, c->pending_has_text);
 
     if (sel->current_offer) {
         zwlr_data_control_offer_v1_destroy(sel->current_offer);
@@ -278,9 +293,11 @@ static void data_control_selection(void *data, struct zwlr_data_control_device_v
         return;
     }
 
+    /* This offer was introduced by the data_offer event immediately
+     * preceding this one, so it must still be our pending one. */
     sel->current_offer = offer;
-    sel->current_has_text = sel->pending_has_text;
-    sel->pending_offer = NULL;
+    sel->current_has_text = c->pending_has_text;
+    c->pending_offer = NULL;
 
     if (!sel->current_has_text) {
         return; /* nothing in a format we support (yet) */
@@ -292,24 +309,28 @@ static void data_control_selection(void *data, struct zwlr_data_control_device_v
                (guint8 *)types, sizeof(types));
 }
 
+static void data_control_selection(void *data, struct zwlr_data_control_device_v1 *device,
+                                    struct zwlr_data_control_offer_v1 *offer)
+{
+    (void)device;
+    syslog(LOG_DEBUG, "%s: fired, offer=%p", __func__, (void *)offer);
+    data_control_offer_finalized(data, VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD, offer);
+}
+
+static void data_control_primary_selection(void *data, struct zwlr_data_control_device_v1 *device,
+                                            struct zwlr_data_control_offer_v1 *offer)
+{
+    (void)device;
+    syslog(LOG_DEBUG, "%s: fired, offer=%p", __func__, (void *)offer);
+    data_control_offer_finalized(data, VD_AGENT_CLIPBOARD_SELECTION_PRIMARY, offer);
+}
+
 static void data_control_finished(void *data, struct zwlr_data_control_device_v1 *device)
 {
     /* Compositor tore down our data-control device (e.g. seat removed).
      * Nothing to reconnect to for the process's remaining lifetime. */
     (void)data;
     (void)device;
-}
-
-static void data_control_primary_selection(void *data, struct zwlr_data_control_device_v1 *device,
-                                            struct zwlr_data_control_offer_v1 *offer)
-{
-    /* Phase 2 territory (PRIMARY selection) -- just avoid leaking the
-     * offer for now. */
-    (void)data;
-    (void)device;
-    if (offer) {
-        zwlr_data_control_offer_v1_destroy(offer);
-    }
 }
 
 static const struct zwlr_data_control_device_v1_listener device_listener = {
@@ -342,12 +363,19 @@ static const struct wl_registry_listener registry_listener = {
     registry_global_remove,
 };
 
+typedef struct {
+    VDAgentClipboards *c;
+    guint sel_id;
+} ReceiveRequest;
+
 /* Data lands in a pipe from zwlr_data_control_offer_v1_receive(); read it
  * into a growable buffer and hand it to the client. */
 static void data_control_splice_ready_cb(GObject *source, GAsyncResult *result, gpointer user_data)
 {
-    VDAgentClipboards *c = user_data;
-    guint sel_id = 0;
+    ReceiveRequest *req = user_data;
+    VDAgentClipboards *c = req->c;
+    guint sel_id = req->sel_id;
+    g_free(req);
     GError *error = NULL;
     GOutputStream *sink = G_OUTPUT_STREAM(source);
 
@@ -497,8 +525,11 @@ void vdagent_clipboard_request(VDAgentClipboards *c, guint sel_id, guint type)
 
     GInputStream *src = g_unix_input_stream_new(pipe_fds[0], TRUE);
     GOutputStream *sink = g_memory_output_stream_new_resizable();
+    ReceiveRequest *req = g_new(ReceiveRequest, 1);
+    req->c = c;
+    req->sel_id = sel_id;
     g_output_stream_splice_async(sink, src, G_OUTPUT_STREAM_SPLICE_CLOSE_SOURCE,
-                                 G_PRIORITY_DEFAULT, NULL, data_control_splice_ready_cb, c);
+                                 G_PRIORITY_DEFAULT, NULL, data_control_splice_ready_cb, req);
     g_object_unref(src);
     return;
 err:
@@ -520,15 +551,14 @@ VDAgentClipboards *vdagent_clipboards_new(struct vdagent_x11 *x11)
     self->x11 = x11;
 #else
     (void)x11;
-    guint sel_id;
     GdkDisplay *gdk_display = gdk_display_get_default();
 
-    for (sel_id = 0; sel_id < SELECTION_COUNT; sel_id++) {
-        /* write side only -- see the file-level comment for why the
-         * observe side doesn't use this. Phase 2 adds PRIMARY via
-         * gdk_display_get_primary_clipboard() as a second array slot. */
-        self->selections[sel_id].clipboard = gdk_display_get_clipboard(gdk_display);
-    }
+    /* write side only -- see the file-level comment for why the observe
+     * side doesn't use GdkClipboard at all. */
+    self->selections[VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD].clipboard =
+        gdk_display_get_clipboard(gdk_display);
+    self->selections[VD_AGENT_CLIPBOARD_SELECTION_PRIMARY].clipboard =
+        gdk_display_get_primary_clipboard(gdk_display);
 
     /* observe side: bind wlr-data-control directly (no GDK equivalent
      * exists -- it's a compositor-specific protocol extension, not part
@@ -544,6 +574,9 @@ VDAgentClipboards *vdagent_clipboards_new(struct vdagent_x11 *x11)
         self->data_control_device =
             zwlr_data_control_manager_v1_get_data_device(self->data_control_manager, wl_seat);
         zwlr_data_control_device_v1_add_listener(self->data_control_device, &device_listener, self);
+        syslog(LOG_DEBUG, "%s: bound zwlr_data_control_manager_v1=%p device=%p seat=%p",
+               __func__, (void *)self->data_control_manager, (void *)self->data_control_device,
+               (void *)wl_seat);
     } else {
         syslog(LOG_WARNING, "%s: compositor has no zwlr_data_control_manager_v1; "
                             "guest clipboard changes will not be observed", __func__);
