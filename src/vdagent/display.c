@@ -21,6 +21,7 @@
 
 #include <config.h>
 
+#include <math.h>
 #include <glib.h>
 #ifdef WITH_GTK
 #include <gdk/gdk.h>
@@ -105,10 +106,26 @@ static GArray *vdagent_gtk_get_resolutions(VDAgentDisplay *display,
         GdkRectangle geometry;
 
         gdk_monitor_get_geometry(monitor, &geometry);
-        curr.x = geometry.x;
-        curr.y = geometry.y;
-        curr.height = geometry.height;
-        curr.width = geometry.width;
+        /* gdk_monitor_get_geometry() reports logical (scale-divided) pixels,
+         * but every consumer of this resolution downstream -- the SPICE
+         * protocol's absolute cursor positions, the actual guest
+         * framebuffer QEMU scans out -- works in physical pixels. Left
+         * unscaled, a fractionally-scaled monitor (anything other than an
+         * exact integer scale) reports a resolution smaller than the real
+         * framebuffer by exactly the scale factor, and every absolute
+         * pointer position the client sends (already in real physical
+         * pixels) then lands proportionally wrong on screen -- confirmed:
+         * this is why the guest's on-screen cursor tracked at the wrong
+         * rate specifically when Hyprland's monitor scale was set to
+         * anything other than 1.0, and stopped the moment scale was reset
+         * to 1.0 (where logical and physical pixels are identical, hiding
+         * the bug rather than fixing it).
+         */
+        double scale = gdk_monitor_get_scale(monitor);
+        curr.x = (int)lround(geometry.x * scale);
+        curr.y = (int)lround(geometry.y * scale);
+        curr.height = (int)lround(geometry.height * scale);
+        curr.width = (int)lround(geometry.width * scale);
 
         // compute the size of the desktop based on the dimension of the monitors
         // TODO: check for a specific API giving us that information (not found in GTK ?)
@@ -145,10 +162,11 @@ static GArray *vdagent_gtk_get_resolutions(VDAgentDisplay *display,
             GdkRectangle geometry;
 
             gdk_monitor_get_geometry(monitor, &geometry);
-            res.x = geometry.x;
-            res.y = geometry.y;
-            res.height = geometry.height;
-            res.width = geometry.width;
+            double scale = gdk_monitor_get_scale(monitor);
+            res.x = (int)lround(geometry.x * scale);
+            res.y = (int)lround(geometry.y * scale);
+            res.height = (int)lround(geometry.height * scale);
+            res.width = (int)lround(geometry.width * scale);
             res.display_id = i;
 
             g_array_append_val(res_array, res);
