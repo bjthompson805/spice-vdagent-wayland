@@ -14,7 +14,7 @@ apt-get install -y --no-install-recommends \
 	build-essential devscripts debhelper dh-autoreconf pkgconf \
 	libgtk-4-dev libglib2.0-dev libwayland-dev libxfixes-dev libxrandr-dev \
 	libxinerama-dev libx11-dev libasound2-dev libdbus-1-dev libdrm-dev \
-	libpciaccess-dev libsystemd-dev spice-protocol
+	libpciaccess-dev libsystemd-dev libspice-protocol-dev
 
 build_root=/tmp/debbuild/spice-vdagent-wayland
 mkdir -p "$build_root"

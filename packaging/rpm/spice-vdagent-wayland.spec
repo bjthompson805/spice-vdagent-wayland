@@ -56,7 +56,16 @@ Fork of the official spice-vdagent adding native Wayland support:
 # verified locally on Arch, where the same gap left socket activation support
 # out of the build entirely and the built vdagentd then fought systemd's own
 # spice-vdagentd.socket unit for the same listening socket.
+# --sbindir=%{_sbindir}: explicit, not left to autotools' own default
+# (${exec_prefix}/sbin) -- on a usr-merged Fedora, %_sbindir itself expands
+# to the same place as %_bindir, but that's just this spec's own macro
+# table, not something the built binary's actual install path knows about
+# on its own. Leaving them to disagree is exactly what broke the first CI
+# run: %files' %{_sbindir}/spice-vdagentd looked in usr/bin (where the
+# macro pointed), but the binary had actually landed in a real, separate
+# usr/sbin the autotools default created inside the fresh buildroot.
 ./autogen.sh --prefix=%{_prefix} --sysconfdir=%{_sysconfdir} \
+             --sbindir=%{_sbindir} \
              --with-gtk4=yes --with-init-script=systemd
 %make_build
 

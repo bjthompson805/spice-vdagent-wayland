@@ -17,7 +17,7 @@ Build-Depends: debhelper-compat (= 13),
                libdrm-dev,
                libpciaccess-dev,
                libsystemd-dev,
-               spice-protocol
+               libspice-protocol-dev
 Standards-Version: 4.6.2
 Homepage: https://github.com/bjthompson805/spice-vdagent-wayland
 Rules-Requires-Root: no
