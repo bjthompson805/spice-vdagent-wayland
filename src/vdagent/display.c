@@ -77,6 +77,26 @@ static gint vdagent_guest_xorg_resolution_compare(gconstpointer a, gconstpointer
     return ptr_a->display_id - ptr_b->display_id;
 }
 
+#ifdef USE_GTK_FOR_MONITORS
+/* gdk_monitor_get_scale() (the real fractional scale, a double) was only
+ * added in GTK 4.12 -- older GTK4 (e.g. Debian bookworm's 4.8, confirmed
+ * via a real CI build failure: "undefined reference to
+ * gdk_monitor_get_scale") only has gdk_monitor_get_scale_factor(), which
+ * rounds to the nearest integer. Falling back to that on old GTK4 is not
+ * as correct on a genuinely fractional scale, but it is what every
+ * caller of this function assumed before this file's own resolution-
+ * reporting fix existed, so it is strictly no worse than that, and it
+ * compiles. */
+static double monitor_get_scale(GdkMonitor *monitor)
+{
+#if GTK_CHECK_VERSION(4, 12, 0)
+    return gdk_monitor_get_scale(monitor);
+#else
+    return (double)gdk_monitor_get_scale_factor(monitor);
+#endif
+}
+#endif
+
 static GArray *vdagent_gtk_get_resolutions(VDAgentDisplay *display,
                                            int *width, int *height, int *screen_count)
 {
@@ -121,7 +141,7 @@ static GArray *vdagent_gtk_get_resolutions(VDAgentDisplay *display,
          * to 1.0 (where logical and physical pixels are identical, hiding
          * the bug rather than fixing it).
          */
-        double scale = gdk_monitor_get_scale(monitor);
+        double scale = monitor_get_scale(monitor);
         curr.x = (int)lround(geometry.x * scale);
         curr.y = (int)lround(geometry.y * scale);
         curr.height = (int)lround(geometry.height * scale);
@@ -162,7 +182,7 @@ static GArray *vdagent_gtk_get_resolutions(VDAgentDisplay *display,
             GdkRectangle geometry;
 
             gdk_monitor_get_geometry(monitor, &geometry);
-            double scale = gdk_monitor_get_scale(monitor);
+            double scale = monitor_get_scale(monitor);
             res.x = (int)lround(geometry.x * scale);
             res.y = (int)lround(geometry.y * scale);
             res.height = (int)lround(geometry.height * scale);
