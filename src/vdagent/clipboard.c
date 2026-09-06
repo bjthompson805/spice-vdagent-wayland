@@ -34,9 +34,8 @@
 #include "clipboard.h"
 
 #ifdef USE_GTK_FOR_CLIPBOARD
-/* GTK4 port notes (Phase 1+2: text, both CLIPBOARD and PRIMARY selections
- * -- see the project plan for Phase 3, which adds image formats on top of
- * this same structure).
+/* GTK4 port notes (Phase 1+2+3: text and image formats (PNG/BMP/TIFF/JPG),
+ * both CLIPBOARD and PRIMARY selections).
  *
  * Two entirely different mechanisms are used for the two directions, and
  * that split is deliberate, not incidental:
@@ -71,6 +70,53 @@
 
 #define TEXT_MIME_TYPE "text/plain;charset=utf-8"
 
+/* VD_AGENT_CLIPBOARD_* type ids index directly into TYPE_COUNT-sized
+ * arrays below (NONE's slot 0 is simply never populated). */
+#define TYPE_COUNT (VD_AGENT_CLIPBOARD_IMAGE_JPG + 1)
+
+/* A spice type can have more than one recognized mime spelling (image/bmp
+ * has three real-world aliases) but a mime string maps to exactly one
+ * type, so this table is looked up two different ways below. */
+static const struct {
+    guint       type;
+    const char *mime_type;
+} type2mime[] = {
+    {VD_AGENT_CLIPBOARD_UTF8_TEXT,  TEXT_MIME_TYPE},
+    {VD_AGENT_CLIPBOARD_IMAGE_PNG,  "image/png"},
+    {VD_AGENT_CLIPBOARD_IMAGE_BMP,  "image/bmp"},
+    {VD_AGENT_CLIPBOARD_IMAGE_BMP,  "image/x-bmp"},
+    {VD_AGENT_CLIPBOARD_IMAGE_BMP,  "image/x-MS-bmp"},
+    {VD_AGENT_CLIPBOARD_IMAGE_BMP,  "image/x-win-bitmap"},
+    {VD_AGENT_CLIPBOARD_IMAGE_TIFF, "image/tiff"},
+    {VD_AGENT_CLIPBOARD_IMAGE_JPG,  "image/jpeg"},
+};
+
+static guint type_from_mime_type(const char *mime_type)
+{
+    for (guint i = 0; i < G_N_ELEMENTS(type2mime); i++) {
+        if (!g_ascii_strcasecmp(mime_type, type2mime[i].mime_type)) {
+            return type2mime[i].type;
+        }
+    }
+    return VD_AGENT_CLIPBOARD_NONE;
+}
+
+/* Canonical (first-listed) mime spelling for a spice type -- used on the
+ * write side, where we choose what string to advertise/request. The
+ * observe side instead keeps whatever exact string the guest offered (see
+ * Selection.current_mime below): a source app may only recognize the
+ * specific alias spelling it advertised, so we must ask it back for that
+ * same one rather than our own canonical choice. */
+static const char *mime_type_for_type(guint type)
+{
+    for (guint i = 0; i < G_N_ELEMENTS(type2mime); i++) {
+        if (type2mime[i].type == type) {
+            return type2mime[i].mime_type;
+        }
+    }
+    return NULL;
+}
+
 enum {
     OWNER_NONE,
     OWNER_GUEST,
@@ -82,15 +128,19 @@ typedef struct {
     GdkClipboard *clipboard;
     guint         owner;
     GList        *requests_from_apps; /* GTask* list: VDAgent --> Client (guest paste of our data) */
+    /* which types the client told us it can supply, from the most recent
+     * vdagent_clipboard_grab() -- read by ref_formats (what to advertise)
+     * and write_mime_type_async (what to accept a request for). */
+    gboolean      type_available[TYPE_COUNT];
 
     /* observe side (guest -> host): wlr-data-control, see above.
-     * pending_offer/pending_has_text live on VDAgentClipboards, not here
-     * -- a freshly-introduced offer (data_offer event) doesn't say which
+     * pending_mime lives on VDAgentClipboards, not here -- a
+     * freshly-introduced offer (data_offer event) doesn't say which
      * selection it's for until the following selection/primary_selection
      * event arrives, so there's nothing to key a per-Selection pending
      * state on yet. */
     struct zwlr_data_control_offer_v1 *current_offer; /* finalized; safe to receive() from */
-    gboolean      current_has_text;
+    char         *current_mime[TYPE_COUNT]; /* owned; exact string the guest offered, NULL if absent */
     /* zwlr_data_control_device_v1's "selection" event fires for every
      * seat-wide selection change, including ones this same process just
      * caused via gdk_clipboard_set_content() on the *other* protocol
@@ -115,16 +165,11 @@ struct _VdagentClipboardProvider {
 
 G_DEFINE_FINAL_TYPE(VdagentClipboardProvider, vdagent_clipboard_provider, GDK_TYPE_CONTENT_PROVIDER)
 
-static GdkContentFormats *vdagent_clipboard_provider_ref_formats(GdkContentProvider *provider)
-{
-    (void)provider;
-    GdkContentFormatsBuilder *builder = gdk_content_formats_builder_new();
-    gdk_content_formats_builder_add_mime_type(builder, TEXT_MIME_TYPE);
-    return gdk_content_formats_builder_free_to_formats(builder);
-}
+/* Both of these are defined further down, once struct _VDAgentClipboards
+ * (which they dereference, via self->clipboards->selections[...]) is
+ * actually complete. */
+static GdkContentFormats *vdagent_clipboard_provider_ref_formats(GdkContentProvider *provider);
 
-/* Defined further down, once struct _VDAgentClipboards (which this
- * dereferences) is actually complete. */
 static void vdagent_clipboard_provider_write_mime_type_async(
     GdkContentProvider *provider, const char *mime_type, GOutputStream *stream,
     int io_priority, GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data);
@@ -167,7 +212,7 @@ struct _VDAgentClipboards {
      * data_offer event; see the Selection typedef above for why this
      * isn't keyed per-selection. */
     struct zwlr_data_control_offer_v1 *pending_offer;
-    gboolean pending_has_text;
+    char *pending_mime[TYPE_COUNT]; /* owned; NULL where not (yet) offered */
 #else
     struct vdagent_x11 *x11;
 #endif
@@ -181,6 +226,20 @@ struct _VDAgentClipboardsClass
 G_DEFINE_TYPE(VDAgentClipboards, vdagent_clipboards, G_TYPE_OBJECT)
 
 #ifdef USE_GTK_FOR_CLIPBOARD
+static GdkContentFormats *vdagent_clipboard_provider_ref_formats(GdkContentProvider *provider)
+{
+    VdagentClipboardProvider *self = VDAGENT_CLIPBOARD_PROVIDER(provider);
+    Selection *sel = &self->clipboards->selections[self->sel_id];
+
+    GdkContentFormatsBuilder *builder = gdk_content_formats_builder_new();
+    for (guint type = 0; type < TYPE_COUNT; type++) {
+        if (sel->type_available[type]) {
+            gdk_content_formats_builder_add_mime_type(builder, mime_type_for_type(type));
+        }
+    }
+    return gdk_content_formats_builder_free_to_formats(builder);
+}
+
 static void vdagent_clipboard_provider_write_mime_type_async(
     GdkContentProvider *provider, const char *mime_type, GOutputStream *stream,
     int io_priority, GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data)
@@ -192,7 +251,8 @@ static void vdagent_clipboard_provider_write_mime_type_async(
 
     GTask *task = g_task_new(provider, cancellable, callback, user_data);
 
-    if (g_strcmp0(mime_type, TEXT_MIME_TYPE) != 0) {
+    guint type = type_from_mime_type(mime_type);
+    if (type == VD_AGENT_CLIPBOARD_NONE || !sel->type_available[type]) {
         g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
                                 "unsupported mime type %s", mime_type);
         g_object_unref(task);
@@ -200,10 +260,13 @@ static void vdagent_clipboard_provider_write_mime_type_async(
     }
 
     g_task_set_task_data(task, g_object_ref(stream), g_object_unref);
+    /* vdagent_clipboard_data() only carries a type id back from the
+     * client, not the mime string GTK asked for -- remember which type
+     * this task is waiting on so it can be matched back up. */
+    g_object_set_data(G_OBJECT(task), "vdagent-type", GUINT_TO_POINTER(type));
     sel->requests_from_apps = g_list_append(sel->requests_from_apps, task);
 
-    udscs_write(c->conn, VDAGENTD_CLIPBOARD_REQUEST, self->sel_id,
-               VD_AGENT_CLIPBOARD_UTF8_TEXT, NULL, 0);
+    udscs_write(c->conn, VDAGENTD_CLIPBOARD_REQUEST, self->sel_id, type, NULL, 0);
 }
 
 /* Cancel every pending write-side request and mark no one owns the
@@ -233,9 +296,14 @@ static void data_control_offer_offer(void *data, struct zwlr_data_control_offer_
 {
     VDAgentClipboards *c = data;
     (void)offer;
-    syslog(LOG_DEBUG, "%s: mime_type=%s", __func__, mime_type);
-    if (g_strcmp0(mime_type, TEXT_MIME_TYPE) == 0) {
-        c->pending_has_text = TRUE;
+    guint type = type_from_mime_type(mime_type);
+    if (type == VD_AGENT_CLIPBOARD_NONE) {
+        return; /* a format we don't handle, e.g. text/uri-list */
+    }
+    /* first alias wins if the source somehow offers more than one for the
+     * same type (e.g. both image/bmp and image/x-bmp) */
+    if (c->pending_mime[type] == NULL) {
+        c->pending_mime[type] = g_strdup(mime_type);
     }
 }
 
@@ -249,9 +317,13 @@ static void data_control_data_offer(void *data, struct zwlr_data_control_device_
     VDAgentClipboards *c = data;
     (void)device;
 
-    syslog(LOG_DEBUG, "%s: offer=%p", __func__, (void *)offer);
+    /* defensive: a prior data_offer sequence should always have been
+     * consumed by the selection event that follows it, but don't leak its
+     * strings if that assumption is ever wrong. */
+    for (guint type = 0; type < TYPE_COUNT; type++) {
+        g_clear_pointer(&c->pending_mime[type], g_free);
+    }
     c->pending_offer = offer;
-    c->pending_has_text = FALSE;
     zwlr_data_control_offer_v1_add_listener(offer, &offer_listener, c);
 }
 
@@ -263,21 +335,24 @@ static void data_control_offer_finalized(VDAgentClipboards *c, guint sel_id,
 {
     Selection *sel = &c->selections[sel_id];
 
-    syslog(LOG_DEBUG, "%s: sel_id=%u offer=%p expect_own=%d pending_has_text=%d",
-           __func__, sel_id, (void *)offer, sel->expect_own_selection, c->pending_has_text);
-
     if (sel->current_offer) {
         zwlr_data_control_offer_v1_destroy(sel->current_offer);
         sel->current_offer = NULL;
-        sel->current_has_text = FALSE;
+    }
+    for (guint type = 0; type < TYPE_COUNT; type++) {
+        g_clear_pointer(&sel->current_mime[type], g_free);
     }
 
     if (sel->expect_own_selection) {
         /* echo of our own vdagent_clipboard_grab() -- not a real guest
          * change. We still have to consume/destroy the offer object (it's
-         * real, just uninteresting), but must not treat it as GUEST
-         * taking ownership. */
+         * real, just uninteresting) and drop whatever mime types this
+         * offer accumulated, but must not treat it as GUEST taking
+         * ownership. */
         sel->expect_own_selection = FALSE;
+        for (guint type = 0; type < TYPE_COUNT; type++) {
+            g_clear_pointer(&c->pending_mime[type], g_free);
+        }
         if (offer) {
             zwlr_data_control_offer_v1_destroy(offer);
         }
@@ -294,26 +369,31 @@ static void data_control_offer_finalized(VDAgentClipboards *c, guint sel_id,
     }
 
     /* This offer was introduced by the data_offer event immediately
-     * preceding this one, so it must still be our pending one. */
+     * preceding this one, so its accumulated mime types are still our
+     * pending ones. */
     sel->current_offer = offer;
-    sel->current_has_text = c->pending_has_text;
-    c->pending_offer = NULL;
+    guint32 types[TYPE_COUNT];
+    guint n_types = 0;
+    for (guint type = 0; type < TYPE_COUNT; type++) {
+        sel->current_mime[type] = g_steal_pointer(&c->pending_mime[type]);
+        if (sel->current_mime[type]) {
+            types[n_types++] = type;
+        }
+    }
 
-    if (!sel->current_has_text) {
+    if (n_types == 0) {
         return; /* nothing in a format we support (yet) */
     }
 
     clipboard_new_owner(c, sel_id, OWNER_GUEST);
-    guint32 types[] = {VD_AGENT_CLIPBOARD_UTF8_TEXT};
     udscs_write(c->conn, VDAGENTD_CLIPBOARD_GRAB, sel_id, 0,
-               (guint8 *)types, sizeof(types));
+               (guint8 *)types, n_types * sizeof(guint32));
 }
 
 static void data_control_selection(void *data, struct zwlr_data_control_device_v1 *device,
                                     struct zwlr_data_control_offer_v1 *offer)
 {
     (void)device;
-    syslog(LOG_DEBUG, "%s: fired, offer=%p", __func__, (void *)offer);
     data_control_offer_finalized(data, VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD, offer);
 }
 
@@ -321,7 +401,6 @@ static void data_control_primary_selection(void *data, struct zwlr_data_control_
                                             struct zwlr_data_control_offer_v1 *offer)
 {
     (void)device;
-    syslog(LOG_DEBUG, "%s: fired, offer=%p", __func__, (void *)offer);
     data_control_offer_finalized(data, VD_AGENT_CLIPBOARD_SELECTION_PRIMARY, offer);
 }
 
@@ -366,6 +445,7 @@ static const struct wl_registry_listener registry_listener = {
 typedef struct {
     VDAgentClipboards *c;
     guint sel_id;
+    guint type;
 } ReceiveRequest;
 
 /* Data lands in a pipe from zwlr_data_control_offer_v1_receive(); read it
@@ -375,6 +455,7 @@ static void data_control_splice_ready_cb(GObject *source, GAsyncResult *result, 
     ReceiveRequest *req = user_data;
     VDAgentClipboards *c = req->c;
     guint sel_id = req->sel_id;
+    guint type = req->type;
     g_free(req);
     GError *error = NULL;
     GOutputStream *sink = G_OUTPUT_STREAM(source);
@@ -392,7 +473,7 @@ static void data_control_splice_ready_cb(GObject *source, GAsyncResult *result, 
 
     gpointer data = g_memory_output_stream_get_data(G_MEMORY_OUTPUT_STREAM(sink));
     gsize size = g_memory_output_stream_get_data_size(G_MEMORY_OUTPUT_STREAM(sink));
-    udscs_write(c->conn, VDAGENTD_CLIPBOARD_DATA, sel_id, VD_AGENT_CLIPBOARD_UTF8_TEXT, data, size);
+    udscs_write(c->conn, VDAGENTD_CLIPBOARD_DATA, sel_id, type, data, size);
     g_object_unref(sink);
 }
 #endif
@@ -405,19 +486,22 @@ void vdagent_clipboard_grab(VDAgentClipboards *c, guint sel_id,
 #else
     g_return_if_fail(sel_id < SELECTION_COUNT);
 
-    gboolean text_supported = FALSE;
+    Selection *sel = &c->selections[sel_id];
+    for (guint type = 0; type < TYPE_COUNT; type++) {
+        sel->type_available[type] = FALSE;
+    }
+    guint n_supported = 0;
     for (guint i = 0; i < n_types; i++) {
-        if (types[i] == VD_AGENT_CLIPBOARD_UTF8_TEXT) {
-            text_supported = TRUE;
-            break;
+        if (types[i] < TYPE_COUNT && mime_type_for_type(types[i])) {
+            sel->type_available[types[i]] = TRUE;
+            n_supported++;
         }
     }
-    if (!text_supported) {
+    if (n_supported == 0) {
         syslog(LOG_WARNING, "%s: sel_id=%u: no supported type offered", __func__, sel_id);
         return;
     }
 
-    Selection *sel = &c->selections[sel_id];
     VdagentClipboardProvider *provider =
         g_object_new(VDAGENT_TYPE_CLIPBOARD_PROVIDER, NULL);
     provider->clipboards = c;
@@ -439,19 +523,24 @@ void vdagent_clipboard_data(VDAgentClipboards *c, guint sel_id,
     g_return_if_fail(sel_id < SELECTION_COUNT);
     Selection *sel = &c->selections[sel_id];
 
-    if (sel->requests_from_apps == NULL) {
-        syslog(LOG_WARNING, "%s: sel_id=%u: no pending request, skipping", __func__, sel_id);
+    /* Match by the type each request is actually waiting on, not queue
+     * position -- more than one write_mime_type_async can be outstanding
+     * at once (e.g. a paste target that probes both an image type and
+     * text/plain in quick succession). */
+    GList *l;
+    for (l = sel->requests_from_apps; l != NULL; l = l->next) {
+        guint expected = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(l->data), "vdagent-type"));
+        if (expected == type) {
+            break;
+        }
+    }
+    if (l == NULL) {
+        syslog(LOG_WARNING, "%s: sel_id=%u: no pending request for type=%u, skipping",
+               __func__, sel_id, type);
         return;
     }
-    GTask *task = sel->requests_from_apps->data;
-    sel->requests_from_apps = g_list_delete_link(sel->requests_from_apps, sel->requests_from_apps);
-
-    if (type != VD_AGENT_CLIPBOARD_UTF8_TEXT) {
-        g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_FAILED,
-                                "client returned unexpected type %u", type);
-        g_object_unref(task);
-        return;
-    }
+    GTask *task = l->data;
+    sel->requests_from_apps = g_list_delete_link(sel->requests_from_apps, l);
 
     GOutputStream *stream = g_task_get_task_data(task);
     GError *error = NULL;
@@ -505,10 +594,10 @@ void vdagent_clipboard_request(VDAgentClipboards *c, guint sel_id, guint type)
 #else
     Selection *sel;
 
-    if (sel_id >= SELECTION_COUNT || type != VD_AGENT_CLIPBOARD_UTF8_TEXT)
+    if (sel_id >= SELECTION_COUNT || type >= TYPE_COUNT)
         goto err;
     sel = &c->selections[sel_id];
-    if (sel->owner != OWNER_GUEST || !sel->current_offer) {
+    if (sel->owner != OWNER_GUEST || !sel->current_offer || !sel->current_mime[type]) {
         syslog(LOG_WARNING, "%s: sel_id=%d: received request "
                             "while not owning clipboard", __func__, sel_id);
         goto err;
@@ -519,7 +608,10 @@ void vdagent_clipboard_request(VDAgentClipboards *c, guint sel_id, guint type)
         syslog(LOG_WARNING, "%s: sel_id=%d: pipe() failed", __func__, sel_id);
         goto err;
     }
-    zwlr_data_control_offer_v1_receive(sel->current_offer, TEXT_MIME_TYPE, pipe_fds[1]);
+    /* Ask for the exact mime string the guest offered (sel->current_mime),
+     * not our own canonical spelling -- see mime_type_for_type()'s comment
+     * for why those can differ for the same type (e.g. BMP aliases). */
+    zwlr_data_control_offer_v1_receive(sel->current_offer, sel->current_mime[type], pipe_fds[1]);
     close(pipe_fds[1]);
     wl_display_flush(c->wl_display); /* must reach the compositor before the source writes */
 
@@ -528,6 +620,7 @@ void vdagent_clipboard_request(VDAgentClipboards *c, guint sel_id, guint type)
     ReceiveRequest *req = g_new(ReceiveRequest, 1);
     req->c = c;
     req->sel_id = sel_id;
+    req->type = type;
     g_output_stream_splice_async(sink, src, G_OUTPUT_STREAM_SPLICE_CLOSE_SOURCE,
                                  G_PRIORITY_DEFAULT, NULL, data_control_splice_ready_cb, req);
     g_object_unref(src);
@@ -574,9 +667,6 @@ VDAgentClipboards *vdagent_clipboards_new(struct vdagent_x11 *x11)
         self->data_control_device =
             zwlr_data_control_manager_v1_get_data_device(self->data_control_manager, wl_seat);
         zwlr_data_control_device_v1_add_listener(self->data_control_device, &device_listener, self);
-        syslog(LOG_DEBUG, "%s: bound zwlr_data_control_manager_v1=%p device=%p seat=%p",
-               __func__, (void *)self->data_control_manager, (void *)self->data_control_device,
-               (void *)wl_seat);
     } else {
         syslog(LOG_WARNING, "%s: compositor has no zwlr_data_control_manager_v1; "
                             "guest clipboard changes will not be observed", __func__);
